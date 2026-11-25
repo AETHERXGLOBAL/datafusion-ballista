@@ -108,6 +108,7 @@ pub async fn new_standalone_executor_from_builder(
         runtime_producer,
         codec,
         function_registry,
+        |_| {},
     )
     .await
     .map(|_| ())
@@ -121,6 +122,7 @@ async fn start_standalone_executor(
     runtime_producer: RuntimeProducer,
     codec: BallistaCodec,
     function_registry: BallistaFunctionRegistry,
+    work_dir_created: impl FnOnce(&str),
 ) -> Result<(String, SocketAddr)> {
     // Let the OS assign a random, free port
     let listener = TcpListener::bind("localhost:0").await?;
@@ -173,6 +175,7 @@ async fn start_standalone_executor(
     let work_dir_owner = Arc::new(work_dir_owner);
 
     info!("work_dir: {work_dir}");
+    work_dir_created(&work_dir);
 
     let executor = Arc::new(
         Executor::with_default_execution_engine(
@@ -301,14 +304,40 @@ mod tests {
     use super::*;
     use crate::execution_loop::tests::MockScheduler;
     use crate::test_util::fresh_runtime_producer;
-    use arrow_flight::Empty;
+    use arrow_flight::Action;
+    use ballista_core::execution_plans::create_shuffle_path;
+    use ballista_core::serde::encode_protobuf;
+    use ballista_core::serde::scheduler::{
+        Action as BallistaAction, ByteRange, ShuffleFileKind, ShuffleLayout,
+    };
     use arrow_flight::flight_service_client::FlightServiceClient;
     use ballista_core::config::BALLISTA_STANDALONE_TASK_SCHEDULING_POLICY;
     use ballista_core::serde::protobuf::scheduler_grpc_server::SchedulerGrpcServer;
     use datafusion::prelude::SessionConfig;
     use std::path::Path;
     use std::time::Duration;
+    use tokio::sync::{Notify, oneshot};
     use tokio_stream::wrappers::TcpListenerStream;
+
+    async fn start_mock_scheduler(mock: MockScheduler) -> SchedulerGrpcClient<Channel> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(SchedulerGrpcServer::new(mock))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        SchedulerGrpcClient::connect(endpoint).await.unwrap()
+    }
+
+    fn test_config(policy: &str) -> ConfigProducer {
+        let mut config = SessionConfig::new_with_ballista();
+        config
+            .options_mut()
+            .set(BALLISTA_STANDALONE_TASK_SCHEDULING_POLICY, policy)
+            .unwrap();
+        Arc::new(move || config.clone())
+    }
 
     fn assert_standalone_work_dir(policy: &str) {
         // Standalone has no public shutdown handle: its services live on
@@ -320,26 +349,15 @@ mod tests {
             .unwrap();
         let path = runtime.block_on(async {
             tokio::time::timeout(Duration::from_secs(15), async {
-                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let endpoint = format!("http://{}", listener.local_addr().unwrap());
-                tokio::spawn(
-                    tonic::transport::Server::builder()
-                        .add_service(SchedulerGrpcServer::new(MockScheduler::idle()))
-                        .serve_with_incoming(TcpListenerStream::new(listener)),
-                );
-                let scheduler = SchedulerGrpcClient::connect(endpoint).await.unwrap();
-                let mut config = SessionConfig::new_with_ballista();
-                config
-                    .options_mut()
-                    .set(BALLISTA_STANDALONE_TASK_SCHEDULING_POLICY, policy)
-                    .unwrap();
+                let scheduler = start_mock_scheduler(MockScheduler::idle()).await;
                 let (path, address) = start_standalone_executor(
                     scheduler,
                     1,
-                    Arc::new(move || config.clone()),
+                    test_config(policy),
                     fresh_runtime_producer(),
                     BallistaCodec::default(),
                     BallistaFunctionRegistry::default(),
+                    |_| {},
                 )
                 .await
                 .unwrap();
@@ -354,14 +372,44 @@ mod tests {
                     let mode = std::fs::metadata(&path).unwrap().permissions().mode();
                     assert_eq!(mode & 0o777, 0o700);
                 }
-                let mut flight =
-                    FlightServiceClient::connect(format!("http://{address}"))
-                        .await
-                        .unwrap();
-                let mut actions =
-                    flight.list_actions(Empty {}).await.unwrap().into_inner();
-                assert!(actions.message().await.unwrap().is_some());
-                std::fs::write(Path::new(&path).join("test-marker"), b"live").unwrap();
+                let channel = Channel::from_shared(format!("http://{address}"))
+                    .unwrap()
+                    .connect()
+                    .await
+                    .unwrap();
+                let mut flight = FlightServiceClient::new(channel);
+                let job_id = "work-dir-test".into();
+                let file = create_shuffle_path(&path, &job_id, 1, 0, None, false)
+                    .unwrap();
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(file, b"live partition").unwrap();
+                let action = BallistaAction::FetchPartition {
+                    job_id,
+                    stage_id: 1,
+                    partition_id: 0,
+                    host: "localhost".into(),
+                    port: address.port(),
+                    file_id: None,
+                    layout: ShuffleLayout::Passthrough,
+                    file_kind: ShuffleFileKind::Data,
+                    byte_ranges: vec![ByteRange {
+                        offset: 0,
+                        length: 4,
+                    }],
+                };
+                let mut stream = flight
+                    .do_action(Action {
+                        r#type: "IO_BLOCK_TRANSPORT".into(),
+                        body: encode_protobuf(action).unwrap().into(),
+                    })
+                    .await
+                    .unwrap()
+                    .into_inner();
+                let mut bytes = Vec::new();
+                while let Some(chunk) = stream.message().await.unwrap() {
+                    bytes.extend_from_slice(&chunk.body);
+                }
+                assert_eq!(bytes, b"live");
                 assert!(Path::new(&path).is_dir());
                 path
             })
@@ -373,6 +421,62 @@ mod tests {
             !Path::new(&path).exists(),
             "standalone {policy} leaked its work directory after runtime shutdown"
         );
+    }
+
+    async fn assert_registration_releases_work_dir(cancel: bool) {
+        let started = Arc::new(Notify::new());
+        let mock = MockScheduler::with_registration(
+            if cancel { None } else { Some(false) },
+            started.clone(),
+        );
+        let scheduler = start_mock_scheduler(mock).await;
+        let (path_tx, path_rx) = oneshot::channel();
+        let task = tokio::spawn(start_standalone_executor(
+            scheduler,
+            1,
+            test_config("push-staged"),
+            fresh_runtime_producer(),
+            BallistaCodec::default(),
+            BallistaFunctionRegistry::default(),
+            move |path| {
+                let _ = path_tx.send(path.to_owned());
+            },
+        ));
+        let path = path_rx.await.unwrap();
+        started.notified().await;
+        if cancel {
+            assert!(Path::new(&path).is_dir());
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        } else {
+            assert!(task.await.unwrap().is_err());
+        }
+        // Registration failure aborts the gRPC task asynchronously. Cancellation
+        // drops the notifier and its gRPC shutdown subscription is released.
+        // The enclosing runtime stays alive while we wait for actual cleanup.
+        while Path::new(&path).exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn standalone_push_registration_failure_releases_work_dir() {
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            assert_registration_releases_work_dir(false),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn standalone_push_registration_cancellation_releases_work_dir() {
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            assert_registration_releases_work_dir(true),
+        )
+        .await
+        .unwrap();
     }
 
     #[test]

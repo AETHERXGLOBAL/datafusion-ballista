@@ -488,10 +488,13 @@ fn retain_work_dir<T: 'static>(
     stream: BoxedFlightStream<T>,
     owner: Option<Arc<TempDir>>,
 ) -> BoxedFlightStream<T> {
-    Box::pin(stream.map(move |item| {
-        let _owner = &owner;
-        item
-    }))
+    match owner {
+        Some(owner) => Box::pin(stream.map(move |item| {
+            let _owner = &owner;
+            item
+        })),
+        None => stream,
+    }
 }
 
 /// Resolve a fetch request's identifiers to the file it names.
@@ -716,12 +719,38 @@ mod tests {
         let owner = Arc::new(owner);
         let service =
             BallistaFlightService::new(path.clone()).with_work_dir_owner(owner.clone());
-        let stream: BoxedFlightStream<FlightData> = Box::pin(futures::stream::pending());
-        let response = retain_work_dir(stream, service.backend.work_dir_owner.clone());
+        let job_id = "work-dir-test".into();
+        let file = create_shuffle_path(&path, &job_id, 1, 0, None, false).unwrap();
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, b"live partition").unwrap();
+        let action = BallistaAction::FetchPartition {
+            job_id,
+            stage_id: 1,
+            partition_id: 0,
+            host: "localhost".into(),
+            port: 0,
+            file_id: None,
+            layout: ShuffleLayout::Passthrough,
+            file_kind: ShuffleFileKind::Data,
+            byte_ranges: vec![ByteRange {
+                offset: 0,
+                length: 4,
+            }],
+        };
+        let mut response = service
+            .do_action(Request::new(Action {
+                r#type: "IO_BLOCK_TRANSPORT".into(),
+                body: encode_protobuf(action).unwrap().into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
 
         drop(owner);
         drop(service);
         assert!(std::path::Path::new(&path).is_dir());
+        let chunk = response.next().await.unwrap().unwrap();
+        assert_eq!(chunk.body.as_ref(), b"live");
         drop(response);
         assert!(!std::path::Path::new(&path).exists());
     }

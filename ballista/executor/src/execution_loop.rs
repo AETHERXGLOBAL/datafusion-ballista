@@ -641,12 +641,23 @@ pub(crate) mod tests {
     /// A scheduler that hands out one task on the first poll and nothing after.
     pub(crate) struct MockScheduler {
         task: Mutex<Option<TaskDefinition>>,
+        registration: Option<bool>,
+        registration_started: Arc<Notify>,
     }
 
     impl MockScheduler {
         pub(crate) fn idle() -> Self {
+            Self::with_registration(Some(true), Arc::new(Notify::new()))
+        }
+
+        pub(crate) fn with_registration(
+            registration: Option<bool>,
+            registration_started: Arc<Notify>,
+        ) -> Self {
             Self {
                 task: Mutex::new(None),
+                registration,
+                registration_started,
             }
         }
     }
@@ -669,10 +680,11 @@ pub(crate) mod tests {
             &self,
             _: Request<RegisterExecutorParams>,
         ) -> GrpcResult<RegisterExecutorResult> {
-            Ok(Response::new(RegisterExecutorResult {
-                success: true,
-                ..Default::default()
-            }))
+            self.registration_started.notify_one();
+            match self.registration {
+                Some(success) => Ok(Response::new(RegisterExecutorResult { success })),
+                None => futures::future::pending().await,
+            }
         }
 
         async fn heart_beat_from_executor(
@@ -798,6 +810,8 @@ pub(crate) mod tests {
         let scheduler =
             SchedulerGrpcClient::new(SchedulerGrpcServer::new(MockScheduler {
                 task: Mutex::new(Some(task_definition(vcores_consumed as u32))),
+                registration: Some(true),
+                registration_started: Arc::new(Notify::new()),
             }));
         let free_vcores = Arc::new(Semaphore::new(VCORES));
         let handle = tokio::spawn(poll_loop(

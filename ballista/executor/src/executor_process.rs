@@ -623,7 +623,6 @@ pub(crate) fn create_default_work_dir() -> ballista_core::error::Result<(String,
 fn prepare_default_work_dir(
     temp_dir: TempDir,
 ) -> ballista_core::error::Result<(String, TempDir)> {
-
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
