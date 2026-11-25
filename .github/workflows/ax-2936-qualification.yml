@@ -35,15 +35,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: ec3222a4e5f2925d3b3a72cc75dfa877f39d681b
+          ref: bc9d2cc95c3ca9ff296b722179819fccea8e5d9c
           persist-credentials: false
       - uses: ./.github/actions/setup-builder
       - name: RED original implementation (two actual failing assertions required)
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "ec3222a4e5f2925d3b3a72cc75dfa877f39d681b"
-          git rev-parse HEAD^{tree}
+          test "$(git rev-parse HEAD)" = "bc9d2cc95c3ca9ff296b722179819fccea8e5d9c"
+          test "$(git rev-parse HEAD^{tree})" = "fa6644f46cbaa7d98238482ce06100844706483e"
           rustc --version
           cargo --version
           umask 022
@@ -60,6 +60,7 @@ jobs:
         if: always()
         with:
           ref: 45a02407caf8ad7da232b1110d94f648a81461d4
+          fetch-depth: 0
           persist-credentials: false
       - name: GREEN exact candidate tests (umask 022)
         if: always()
@@ -85,7 +86,7 @@ jobs:
           set -euxo pipefail
           test "$(git rev-parse HEAD)" = "45a02407caf8ad7da232b1110d94f648a81461d4"
           cargo fmt --all -- --check
-          git diff --check
+          git diff --check a879ad07d204d26df702c681fcb8101dfa1e6c2c HEAD
       - name: Cargo check
         if: always()
         shell: bash
