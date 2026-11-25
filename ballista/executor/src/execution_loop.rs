@@ -532,7 +532,7 @@ async fn sample_tasks_status(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::poll_loop;
     use crate::execution_engine::{ExecutionEngine, QueryStageExecutor};
     use crate::executor::Executor;
@@ -635,8 +635,16 @@ mod tests {
     }
 
     /// A scheduler that hands out one task on the first poll and nothing after.
-    struct MockScheduler {
+    pub(crate) struct MockScheduler {
         task: Mutex<Option<TaskDefinition>>,
+    }
+
+    impl MockScheduler {
+        pub(crate) fn idle() -> Self {
+            Self {
+                task: Mutex::new(None),
+            }
+        }
     }
 
     #[tonic::async_trait]
@@ -657,14 +665,17 @@ mod tests {
             &self,
             _: Request<RegisterExecutorParams>,
         ) -> GrpcResult<RegisterExecutorResult> {
-            not_called()
+            Ok(Response::new(RegisterExecutorResult {
+                success: true,
+                ..Default::default()
+            }))
         }
 
         async fn heart_beat_from_executor(
             &self,
             _: Request<HeartBeatParams>,
         ) -> GrpcResult<HeartBeatResult> {
-            not_called()
+            Ok(Response::new(HeartBeatResult::default()))
         }
 
         async fn update_task_status(
