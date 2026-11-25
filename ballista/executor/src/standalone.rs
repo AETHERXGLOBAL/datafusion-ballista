@@ -20,6 +20,7 @@
 //! This module provides functions for creating executors that run in the same
 //! process as the client, useful for testing and development purposes.
 
+use crate::executor_process::create_default_work_dir;
 use crate::metrics::LoggingMetricsCollector;
 use crate::{execution_loop, executor::Executor, flight_service::BallistaFlightService};
 use arrow_flight::flight_service_server::FlightServiceServer;
@@ -42,7 +43,6 @@ use datafusion::execution::{SessionState, SessionStateBuilder};
 use log::info;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tonic::transport::Channel;
 
@@ -169,22 +169,27 @@ async fn start_standalone_executor(
         ballista_protocol_version: BALLISTA_PROTOCOL_VERSION,
     };
 
-    let work_dir = TempDir::new()?.path().to_str().unwrap().to_string();
+    let (work_dir, work_dir_owner) = create_default_work_dir()?;
+    let work_dir_owner = Arc::new(work_dir_owner);
 
     info!("work_dir: {work_dir}");
 
-    let executor = Arc::new(Executor::with_default_execution_engine(
-        executor_meta,
-        &work_dir,
-        runtime_producer,
-        config_producer,
-        Arc::new(function_registry),
-        Arc::new(LoggingMetricsCollector::default()),
-        vcores,
-    ));
+    let executor = Arc::new(
+        Executor::with_default_execution_engine(
+            executor_meta,
+            &work_dir,
+            runtime_producer,
+            config_producer,
+            Arc::new(function_registry),
+            Arc::new(LoggingMetricsCollector::default()),
+            vcores,
+        )
+        .with_work_dir_owner(work_dir_owner.clone()),
+    );
 
     let service = BallistaFlightService::new(work_dir.clone())
-        .with_pipelined_registry(executor.pipelined_registry().clone());
+        .with_pipelined_registry(executor.pipelined_registry().clone())
+        .with_work_dir_owner(work_dir_owner);
     let server = FlightServiceServer::new(service)
         .max_decoding_message_size(max_message_size)
         .max_encoding_message_size(max_message_size);
@@ -192,12 +197,7 @@ async fn start_standalone_executor(
     // tonic ignores the builder's `tcp_nodelay` and `tcp_keepalive` on a
     // pre-bound listener, so they are set on the incoming stream.
     let grpc_server_config = GrpcServerConfig::default();
-    let incoming = tcp_incoming_from_listener(listener, &grpc_server_config);
-    tokio::spawn(
-        create_grpc_server(&grpc_server_config)
-            .add_service(server)
-            .serve_with_incoming(incoming),
-    );
+    let flight_incoming = tcp_incoming_from_listener(listener, &grpc_server_config);
 
     if let Some(grpc_listener) = grpc_listener {
         let process_config = crate::executor_process::ExecutorProcessConfig {
@@ -212,6 +212,7 @@ async fn start_standalone_executor(
             ..Default::default()
         };
         let shutdown = crate::shutdown::ShutdownNotifier::new();
+        let mut flight_shutdown = shutdown.subscribe_for_shutdown();
         let (stop_send, stop_receive) = tokio::sync::mpsc::channel::<bool>(10);
         let incoming =
             tcp_incoming_from_listener(grpc_listener, &process_config.grpc_server_config);
@@ -230,6 +231,13 @@ async fn start_standalone_executor(
             incoming,
         )
         .await?;
+        // Do not leave a detached Flight service behind if registration fails.
+        tokio::spawn(async move {
+            create_grpc_server(&grpc_server_config)
+                .add_service(server)
+                .serve_with_incoming_shutdown(flight_incoming, flight_shutdown.recv())
+                .await
+        });
         // The executor's loops stop when the notifier is dropped, and its
         // `stop_executor` handler panics if the stop channel's receiver is
         // dropped, so keep both for the life of the runtime.
@@ -238,6 +246,11 @@ async fn start_standalone_executor(
             futures::future::pending::<()>().await
         });
     } else {
+        tokio::spawn(
+            create_grpc_server(&grpc_server_config)
+                .add_service(server)
+                .serve_with_incoming(flight_incoming),
+        );
         tokio::spawn(execution_loop::poll_loop(
             scheduler,
             executor,
@@ -345,7 +358,8 @@ mod tests {
                     FlightServiceClient::connect(format!("http://{address}"))
                         .await
                         .unwrap();
-                let mut actions = flight.list_actions(Empty {}).await.unwrap().into_inner();
+                let mut actions =
+                    flight.list_actions(Empty {}).await.unwrap().into_inner();
                 assert!(actions.message().await.unwrap().is_some());
                 std::fs::write(Path::new(&path).join("test-marker"), b"live").unwrap();
                 assert!(Path::new(&path).is_dir());

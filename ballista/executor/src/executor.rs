@@ -46,6 +46,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
+use tempfile::TempDir;
 
 /// A future that resolves when all active tasks on an executor have completed.
 ///
@@ -120,6 +121,10 @@ pub struct Executor {
     /// The runtime each pipelined job's tasks here share, by job id. See
     /// [`Executor::produce_runtime_for_pipelined_task`].
     pipelined_runtimes: Arc<parking_lot::Mutex<HashMap<String, Weak<RuntimeEnv>>>>,
+
+    // Standalone executors share ownership with Flight and retain it in task clones.
+    // Caller-supplied work directories are never owned here.
+    _work_dir_owner: Option<Arc<TempDir>>,
 }
 
 impl Executor {
@@ -173,6 +178,7 @@ impl Executor {
             memory_metrics: None,
             pipelined_registry,
             pipelined_runtimes: Default::default(),
+            _work_dir_owner: None,
         }
     }
     /// Creates new Executor with default `ExecutionEngine`.
@@ -200,6 +206,11 @@ impl Executor {
 }
 
 impl Executor {
+    pub(crate) fn with_work_dir_owner(mut self, owner: Arc<TempDir>) -> Self {
+        self._work_dir_owner = Some(owner);
+        self
+    }
+
     fn wake_tasks_drained(&self) {
         if self.abort_handles.is_empty() {
             self.tasks_drained_waker.wake();

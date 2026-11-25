@@ -201,15 +201,19 @@ where
                 // Clean up any state related to the listed jobs
                 for cleanup in jobs_to_clean {
                     let job_id = cleanup.job_id.clone().into();
-                    let work_dir = executor.work_dir.clone();
+                    let cleanup_executor = executor.clone();
                     let remove_stage_ids = cleanup.remove_stage_ids.clone();
                     executor.remove_pipelined_job_data(&job_id, &remove_stage_ids);
 
                     // In poll-based cleanup, removing job data is fire-and-forget.
                     // Failures here do not affect task execution and are only logged.
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            remove_job_data(&work_dir, &job_id, &remove_stage_ids).await
+                        if let Err(e) = remove_job_data(
+                            &cleanup_executor.work_dir,
+                            &job_id,
+                            &remove_stage_ids,
+                        )
+                        .await
                         {
                             error!("failed to remove job data {job_id}: {e}");
                         }

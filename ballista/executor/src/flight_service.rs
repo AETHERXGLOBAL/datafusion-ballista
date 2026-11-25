@@ -32,6 +32,7 @@ use std::fs::File;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+use tempfile::TempDir;
 use tokio_util::io::ReaderStream;
 
 use arrow_flight::encode::{DictionaryHandling, FlightDataEncoderBuilder};
@@ -83,8 +84,14 @@ impl BallistaFlightService {
             backend: LocalDiskBackend {
                 work_dir,
                 pipelined_registry: None,
+                work_dir_owner: None,
             },
         }
+    }
+
+    pub(crate) fn with_work_dir_owner(mut self, owner: Arc<TempDir>) -> Self {
+        self.backend.work_dir_owner = Some(owner);
+        self
     }
 
     /// Also serves the output partitions of the pipelined tasks running on
@@ -108,6 +115,7 @@ const BLOCK_BUFFER_CAPACITY: usize = 8 * 1024 * 1024;
 struct LocalDiskBackend {
     work_dir: String,
     pipelined_registry: Option<Arc<PipelinedRegistry>>,
+    work_dir_owner: Option<Arc<TempDir>>,
 }
 
 #[tonic::async_trait]
@@ -239,7 +247,9 @@ impl ResultBackend for LocalDiskBackend {
                     let reader =
                         open_ipc_file(&path).map_err(|e| from_ballista_err(&e))?;
                     let schema = reader.schema();
+                    let owner = self.work_dir_owner.clone();
                     task::spawn_blocking(move || {
+                        let _owner = owner;
                         if let Err(e) = read_partition(reader, tx) {
                             log::warn!("error streaming range shuffle partition: {e}");
                         }
@@ -264,7 +274,9 @@ impl ResultBackend for LocalDiskBackend {
                             ))
                     };
                     let schema = reader.schema();
+                    let owner = self.work_dir_owner.clone();
                     task::spawn_blocking(move || {
+                        let _owner = owner;
                         if let Err(e) = read_partition(reader, tx) {
                             log::warn!("error streaming shuffle partition: {e}");
                         }
@@ -301,7 +313,9 @@ impl FlightService for BallistaFlightService {
         &self,
         request: Request<Ticket>,
     ) -> Result<Response<Self::DoGetStream>, Status> {
-        serve_do_get(&self.backend, request).await
+        let response = serve_do_get(&self.backend, request).await?;
+        let owner = self.backend.work_dir_owner.clone();
+        Ok(response.map(|stream| retain_work_dir(stream, owner)))
     }
 
     async fn get_schema(
@@ -420,7 +434,10 @@ impl FlightService for BallistaFlightService {
                             stream_whole_file(&path).await?
                         };
 
-                        Ok(Response::new(stream))
+                        Ok(Response::new(retain_work_dir(
+                            stream,
+                            self.backend.work_dir_owner.clone(),
+                        )))
                     }
                     BallistaAction::FetchPipelinedPartition { .. } => {
                         Err(Status::invalid_argument(
@@ -463,6 +480,18 @@ impl FlightService for BallistaFlightService {
     ) -> Result<Response<PollInfo>, Status> {
         Err(Status::unimplemented("poll_flight_info"))
     }
+}
+
+// The response body may outlive the service call. Keep its directory until
+// the body is dropped, including lazy range reads after the call returns.
+fn retain_work_dir<T: 'static>(
+    stream: BoxedFlightStream<T>,
+    owner: Option<Arc<TempDir>>,
+) -> BoxedFlightStream<T> {
+    Box::pin(stream.map(move |item| {
+        let _owner = &owner;
+        item
+    }))
 }
 
 /// Resolve a fetch request's identifiers to the file it names.
@@ -680,6 +709,22 @@ fn from_arrow_err(e: &ArrowError) -> Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn flight_response_keeps_work_dir_until_dropped() {
+        let (path, owner) = crate::executor_process::create_default_work_dir().unwrap();
+        let owner = Arc::new(owner);
+        let service =
+            BallistaFlightService::new(path.clone()).with_work_dir_owner(owner.clone());
+        let stream: BoxedFlightStream<FlightData> = Box::pin(futures::stream::pending());
+        let response = retain_work_dir(stream, service.backend.work_dir_owner.clone());
+
+        drop(owner);
+        drop(service);
+        assert!(std::path::Path::new(&path).is_dir());
+        drop(response);
+        assert!(!std::path::Path::new(&path).exists());
+    }
 
     /// The header and the partition are read through two handles of one file.
     /// They must not share a cursor, or the header read starts where the
