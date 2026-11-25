@@ -665,10 +665,7 @@ pub(crate) mod tests {
             &self,
             _: Request<RegisterExecutorParams>,
         ) -> GrpcResult<RegisterExecutorResult> {
-            Ok(Response::new(RegisterExecutorResult {
-                success: true,
-                ..Default::default()
-            }))
+            Ok(Response::new(RegisterExecutorResult { success: true }))
         }
 
         async fn heart_beat_from_executor(
