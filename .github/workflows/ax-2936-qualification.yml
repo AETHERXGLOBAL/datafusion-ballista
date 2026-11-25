@@ -1,0 +1,103 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements. See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership. The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License. You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied. See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# AETHER X GLOBAL fork-only qualification; never part of the upstream patch.
+name: AX 2936 exact-source qualification
+on:
+  push:
+    branches: ["ci/2936-qualification"]
+    paths: [".github/workflows/ax-2936-qualification.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  qualification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    container:
+      image: amd64/rust
+    env:
+      CARGO_TARGET_DIR: /tmp/ax-2936-target
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ec3222a4e5f2925d3b3a72cc75dfa877f39d681b
+          persist-credentials: false
+      - uses: ./.github/actions/setup-builder
+      - name: RED original implementation (two actual failing assertions required)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "ec3222a4e5f2925d3b3a72cc75dfa877f39d681b"
+          git rev-parse HEAD^{tree}
+          rustc --version
+          cargo --version
+          umask 022
+          set +e
+          cargo test --locked --profile ci -p ballista-executor --lib standalone::tests::standalone_ -- --test-threads=1 2>&1 | tee /tmp/ax-2936-red.log
+          result=${PIPESTATUS[0]}
+          set -e
+          echo "RED_EXIT=$result"
+          test "$result" -ne 0
+          grep -F 'standalone pull-staged removed its work directory during startup' /tmp/ax-2936-red.log
+          grep -F 'standalone push-staged removed its work directory during startup' /tmp/ax-2936-red.log
+          grep -F '2 failed' /tmp/ax-2936-red.log
+      - uses: actions/checkout@v7.0.1
+        if: always()
+        with:
+          ref: 45a02407caf8ad7da232b1110d94f648a81461d4
+          persist-credentials: false
+      - name: GREEN exact candidate tests (umask 022)
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = "45a02407caf8ad7da232b1110d94f648a81461d4"
+          test "$(git rev-parse HEAD^{tree})" = "8ba5fcd36b2d131f79db9f128667b52df17e9a81"
+          umask 022
+          cargo test --locked --profile ci -p ballista-executor --lib -- --test-threads=2
+      - name: Unix restrictive umask regression (077)
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = "45a02407caf8ad7da232b1110d94f648a81461d4"
+          umask 077
+          cargo test --locked --profile ci -p ballista-executor --lib standalone::tests::standalone_ -- --test-threads=1
+      - name: Format
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = "45a02407caf8ad7da232b1110d94f648a81461d4"
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Cargo check
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = "45a02407caf8ad7da232b1110d94f648a81461d4"
+          cargo check --locked --profile ci -p ballista-executor --all-targets
+      - name: Clippy
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = "45a02407caf8ad7da232b1110d94f648a81461d4"
+          rustup component add clippy
+          cargo clippy --locked --profile ci -p ballista-executor --lib --tests -- -D warnings
