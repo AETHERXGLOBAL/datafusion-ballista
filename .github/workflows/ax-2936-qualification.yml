@@ -38,7 +38,7 @@ jobs:
       # This delta qualifies the formatting successor without repeating RED.
       - uses: actions/checkout@v7.0.1
         with:
-          ref: 0a9e79d484b912f72437f2ec14f95504d93ca7e6
+          ref: 85dabe6fde55ffa4685bc354be04808c5510aa07
           fetch-depth: 0
           persist-credentials: false
       - name: Trust only the checked-out workspace in the ephemeral container
@@ -46,41 +46,64 @@ jobs:
         run: |
           set -euxo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          test "$(git rev-parse HEAD)" = "0a9e79d484b912f72437f2ec14f95504d93ca7e6"
-          test "$(git rev-parse HEAD^{tree})" = "cba6666412ede92a2b95ee8d6dc824cb83b139ce"
+          test "$(git rev-parse HEAD)" = "85dabe6fde55ffa4685bc354be04808c5510aa07"
+          test "$(git rev-parse HEAD^{tree})" = "fbfea41229e7fb7bb2c1ebc0e0cd1853b383e9d6"
       - uses: ./.github/actions/setup-builder
       - name: GREEN exact candidate tests (umask 022)
         shell: bash
         run: |
           set -euxo pipefail
-          test "$(git rev-parse HEAD)" = "0a9e79d484b912f72437f2ec14f95504d93ca7e6"
-          test "$(git rev-parse HEAD^{tree})" = "cba6666412ede92a2b95ee8d6dc824cb83b139ce"
+          test "$(git rev-parse HEAD)" = "85dabe6fde55ffa4685bc354be04808c5510aa07"
+          test "$(git rev-parse HEAD^{tree})" = "fbfea41229e7fb7bb2c1ebc0e0cd1853b383e9d6"
           umask 022
           cargo test --locked --profile ci -p ballista-executor --lib -- --test-threads=2
       - name: Unix restrictive umask regression (077)
         shell: bash
         run: |
           set -euxo pipefail
-          test "$(git rev-parse HEAD)" = "0a9e79d484b912f72437f2ec14f95504d93ca7e6"
+          test "$(git rev-parse HEAD)" = "85dabe6fde55ffa4685bc354be04808c5510aa07"
           umask 077
           cargo test --locked --profile ci -p ballista-executor --lib standalone::tests::standalone_ -- --test-threads=1
       - name: Format
         shell: bash
         run: |
           set -euxo pipefail
-          test "$(git rev-parse HEAD)" = "0a9e79d484b912f72437f2ec14f95504d93ca7e6"
+          test "$(git rev-parse HEAD)" = "85dabe6fde55ffa4685bc354be04808c5510aa07"
           cargo fmt --all -- --check
           git diff --check a879ad07d204d26df702c681fcb8101dfa1e6c2c HEAD
       - name: Cargo check
         shell: bash
         run: |
           set -euxo pipefail
-          test "$(git rev-parse HEAD)" = "0a9e79d484b912f72437f2ec14f95504d93ca7e6"
+          test "$(git rev-parse HEAD)" = "85dabe6fde55ffa4685bc354be04808c5510aa07"
           cargo check --locked --profile ci -p ballista-executor --all-targets
       - name: Clippy
         shell: bash
         run: |
           set -euxo pipefail
-          test "$(git rev-parse HEAD)" = "0a9e79d484b912f72437f2ec14f95504d93ca7e6"
+          test "$(git rev-parse HEAD)" = "85dabe6fde55ffa4685bc354be04808c5510aa07"
           rustup component add clippy
           cargo clippy --locked --profile ci -p ballista-executor --lib --tests -- -D warnings
+
+  macos-qualification:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: 85dabe6fde55ffa4685bc354be04808c5510aa07
+          persist-credentials: false
+      - name: Verify candidate identity
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = "85dabe6fde55ffa4685bc354be04808c5510aa07"
+          test "$(git rev-parse HEAD^{tree})" = "fbfea41229e7fb7bb2c1ebc0e0cd1853b383e9d6"
+      - uses: ./.github/actions/setup-macos-builder
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      - name: macOS workspace tests (same command as upstream)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export PATH=$PATH:$HOME/d/protoc/bin
+          cargo test --profile ci --locked
