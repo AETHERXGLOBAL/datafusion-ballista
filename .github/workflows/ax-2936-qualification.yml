@@ -59,7 +59,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         if: always()
         with:
-          ref: 45a02407caf8ad7da232b1110d94f648a81461d4
+          ref: 2d04b04b405dc055108391ebd9b05a20e1730e93
           fetch-depth: 0
           persist-credentials: false
       - name: GREEN exact candidate tests (umask 022)
@@ -67,8 +67,8 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          test "$(git rev-parse HEAD)" = "45a02407caf8ad7da232b1110d94f648a81461d4"
-          test "$(git rev-parse HEAD^{tree})" = "8ba5fcd36b2d131f79db9f128667b52df17e9a81"
+          test "$(git rev-parse HEAD)" = "2d04b04b405dc055108391ebd9b05a20e1730e93"
+          test "$(git rev-parse HEAD^{tree})" = "958441100c6a120556df452a2ab439ff54d4308b"
           umask 022
           cargo test --locked --profile ci -p ballista-executor --lib -- --test-threads=2
       - name: Unix restrictive umask regression (077)
@@ -76,7 +76,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          test "$(git rev-parse HEAD)" = "45a02407caf8ad7da232b1110d94f648a81461d4"
+          test "$(git rev-parse HEAD)" = "2d04b04b405dc055108391ebd9b05a20e1730e93"
           umask 077
           cargo test --locked --profile ci -p ballista-executor --lib standalone::tests::standalone_ -- --test-threads=1
       - name: Format
@@ -84,7 +84,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          test "$(git rev-parse HEAD)" = "45a02407caf8ad7da232b1110d94f648a81461d4"
+          test "$(git rev-parse HEAD)" = "2d04b04b405dc055108391ebd9b05a20e1730e93"
           cargo fmt --all -- --check
           git diff --check a879ad07d204d26df702c681fcb8101dfa1e6c2c HEAD
       - name: Cargo check
@@ -92,13 +92,13 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          test "$(git rev-parse HEAD)" = "45a02407caf8ad7da232b1110d94f648a81461d4"
+          test "$(git rev-parse HEAD)" = "2d04b04b405dc055108391ebd9b05a20e1730e93"
           cargo check --locked --profile ci -p ballista-executor --all-targets
       - name: Clippy
         if: always()
         shell: bash
         run: |
           set -euxo pipefail
-          test "$(git rev-parse HEAD)" = "45a02407caf8ad7da232b1110d94f648a81461d4"
+          test "$(git rev-parse HEAD)" = "2d04b04b405dc055108391ebd9b05a20e1730e93"
           rustup component add clippy
           cargo clippy --locked --profile ci -p ballista-executor --lib --tests -- -D warnings
