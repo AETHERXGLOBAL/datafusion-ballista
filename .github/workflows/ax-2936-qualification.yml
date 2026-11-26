@@ -35,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: aed8b4c870990f47cffbaa96954239d67acb24cf
+          ref: cb4f222eb5517aa9f73d3afaedefbfa1a6de8663
           fetch-depth: 0
           persist-credentials: false
       - name: Verify exact source
@@ -43,57 +43,27 @@ jobs:
         run: |
           set -euxo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          test "$(git rev-parse HEAD)" = "aed8b4c870990f47cffbaa96954239d67acb24cf"
-          test "$(git rev-parse HEAD^{tree})" = "9e0a5ef90dad66c0e0a2d248d0873b8c1ec05997"
+          test "$(git rev-parse HEAD)" = "cb4f222eb5517aa9f73d3afaedefbfa1a6de8663"
+          test "$(git rev-parse HEAD^{tree})" = "c66c5dae6201f95d2f92250382e60127e4d9bc26"
       - uses: ./.github/actions/setup-builder
-      - name: E01 D2 affected test under both umasks
+      # Accepted functional/mutation evidence stays at predecessor aed8b4c870990f47cffbaa96954239d67acb24cf.
+      - name: Verify exact rustfmt-only delta
         shell: bash
         run: |
-          set -euo pipefail
-          dir="$RUNNER_TEMP/ax2936-e01-e06"
-          mkdir -p "$dir"
-          printf 'source=%s\ntree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" > "$dir/source.txt"
-          for mask in 022 077; do
-            umask "$mask"
-            cargo test --locked --profile ci -p ballista-executor --lib owned_shuffle_and_flight_overlap_runtime_shutdown -- --test-threads=1 2>&1 | tee "$dir/green-$mask.log"
-            grep -F 'test result: ok. 1 passed; 0 failed;' "$dir/green-$mask.log"
-          done
-      - name: E03 isolated runtime-owner negative control
-        shell: bash
-        run: |
-          set -euo pipefail
-          export EVIDENCE_DIR="$RUNNER_TEMP/ax2936-e01-e06"
-          control="$(mktemp -d)"
-          git worktree add --detach "$control/source" HEAD
-          trap 'git worktree remove --force "$control/source"; rmdir "$control"' EXIT
-          cd "$control/source"
+          set -euxo pipefail
+          git diff --exit-code aed8b4c870990f47cffbaa96954239d67acb24cf HEAD -- . ':!ballista/executor/src/executor.rs'
           python3 - <<'PY'
-          from pathlib import Path
-          path = Path("ballista/executor/src/cpu_bound_executor.rs")
-          source = path.read_text()
-          old = "let _work_dir_owner = work_dir_owner;"
-          assert source.count(old) == 1
-          path.write_text(source.replace(old, "drop(work_dir_owner);"))
+          import subprocess
+          path = "ballista/executor/src/executor.rs"
+          before = subprocess.check_output(["git","show","aed8b4c870990f47cffbaa96954239d67acb24cf:" + path]).decode()
+          after = subprocess.check_output(["git","show","HEAD:" + path]).decode()
+          before = before.replace("        use ballista_core::utils::disk_writer_test_gate;\n        use ballista_core::serde::encode_protobuf;", "        use ballista_core::serde::encode_protobuf;")
+          before = before.replace("            Action as BallistaAction, ByteRange, ShuffleFileKind, ShuffleLayout,\n        };\n        use futures::StreamExt;", "            Action as BallistaAction, ByteRange, ShuffleFileKind, ShuffleLayout,\n        };\n        use ballista_core::utils::disk_writer_test_gate;\n        use futures::StreamExt;")
+          before = before.replace("        let writer_saw_file = gate.finished.recv_timeout(Duration::from_secs(10)).unwrap();", "        let writer_saw_file =\n            gate.finished.recv_timeout(Duration::from_secs(10)).unwrap();")
+          assert before == after
           PY
-          git diff --check
-          git diff > "$EVIDENCE_DIR/runtime.patch"
-          printf 'cargo test --locked --profile ci -p ballista-executor --lib owned_shuffle_and_flight_overlap_runtime_shutdown -- --test-threads=1\n' > "$EVIDENCE_DIR/runtime.command"
-          set +e
-          cargo test --locked --profile ci -p ballista-executor --lib owned_shuffle_and_flight_overlap_runtime_shutdown -- --test-threads=1 2>&1 | tee "$EVIDENCE_DIR/runtime.log"
-          rc=${PIPESTATUS[0]}
-          set -e
-          printf '%s\n' "$rc" > "$EVIDENCE_DIR/runtime.exit"
-          test "$rc" = 101
-          grep -F AX2936_RUNTIME_OWNER "$EVIDENCE_DIR/runtime.log"
-          grep -F 'test result: FAILED. 0 passed; 1 failed;' "$EVIDENCE_DIR/runtime.log"
-          git restore -- ballista/executor/src/cpu_bound_executor.rs
-          git diff --exit-code
-          test "$(git rev-parse HEAD^{tree})" = "9e0a5ef90dad66c0e0a2d248d0873b8c1ec05997"
-          cargo test --locked --profile ci -p ballista-executor --lib owned_shuffle_and_flight_overlap_runtime_shutdown -- --test-threads=1 2>&1 | tee "$EVIDENCE_DIR/restored-green.log"
-          grep -F 'test result: ok. 1 passed; 0 failed;' "$EVIDENCE_DIR/restored-green.log"
-          cd "$GITHUB_WORKSPACE"
-          test "$(git rev-parse HEAD)" = "aed8b4c870990f47cffbaa96954239d67acb24cf"
-          git diff --exit-code
+          mkdir -p "$RUNNER_TEMP/ax2936-e01-e06"
+          printf 'source=%s\ntree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" > "$RUNNER_TEMP/ax2936-e01-e06/source.txt"
       - name: E04 Format
         shell: bash
         run: |
@@ -133,52 +103,4 @@ jobs:
         with:
           name: ax2936-e01-e06-${{ github.run_id }}
           path: ${{ runner.temp }}/ax2936-e01-e06/
-          if-no-files-found: error
-  macos-qualification:
-    runs-on: macos-latest
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          ref: aed8b4c870990f47cffbaa96954239d67acb24cf
-          persist-credentials: false
-      - name: Verify exact source
-        shell: bash
-        run: |
-          set -euxo pipefail
-          test "$(git rev-parse HEAD)" = "aed8b4c870990f47cffbaa96954239d67acb24cf"
-          test "$(git rev-parse HEAD^{tree})" = "9e0a5ef90dad66c0e0a2d248d0873b8c1ec05997"
-      - uses: ./.github/actions/setup-macos-builder
-      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
-      - name: E01 D2 affected test under both umasks
-        shell: bash
-        run: |
-          set -euo pipefail
-          export PATH=$PATH:$HOME/d/protoc/bin
-          dir="$RUNNER_TEMP/ax2936-e01-e06-macos"
-          mkdir -p "$dir"
-          printf 'source=%s\ntree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" > "$dir/source.txt"
-          for mask in 022 077; do
-            umask "$mask"
-            cargo test --locked --profile ci -p ballista-executor --lib owned_shuffle_and_flight_overlap_runtime_shutdown -- --test-threads=1 2>&1 | tee "$dir/green-$mask.log"
-            grep -F 'test result: ok. 1 passed; 0 failed;' "$dir/green-$mask.log"
-          done
-      - name: macOS evidence manifest
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          dir="$RUNNER_TEMP/ax2936-e01-e06-macos"
-          mkdir -p "$dir"
-          cd "$dir"
-          for f in *.txt *.log; do
-            if test -f "$f"; then shasum -a 256 "$f"; fi
-          done > SHA256SUMS
-          cat SHA256SUMS
-      - name: Preserve macOS evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ax2936-e01-e06-macos-${{ github.run_id }}
-          path: ${{ runner.temp }}/ax2936-e01-e06-macos/
           if-no-files-found: error
