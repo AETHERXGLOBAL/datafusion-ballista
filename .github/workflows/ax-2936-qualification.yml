@@ -35,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: cb4f222eb5517aa9f73d3afaedefbfa1a6de8663
+          ref: 236fdbcbf4f48784b7d79a66924ddbc3552760f2
           fetch-depth: 0
           persist-credentials: false
       - name: Verify exact source
@@ -43,56 +43,145 @@ jobs:
         run: |
           set -euxo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          test "$(git rev-parse HEAD)" = "cb4f222eb5517aa9f73d3afaedefbfa1a6de8663"
-          test "$(git rev-parse HEAD^{tree})" = "c66c5dae6201f95d2f92250382e60127e4d9bc26"
+          test "$(git rev-parse HEAD)" = "236fdbcbf4f48784b7d79a66924ddbc3552760f2"
+          test "$(git rev-parse HEAD^{tree})" = "3eab5ab4d5aa7ee2fcab75a0f68b5407753d620d"
       - uses: ./.github/actions/setup-builder
-      # Accepted functional/mutation evidence stays at predecessor aed8b4c870990f47cffbaa96954239d67acb24cf.
-      - name: Verify exact rustfmt-only delta
+      - name: F04 D2 affected test under both umasks
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/ax2936-f01-f04"
+          mkdir -p "$dir"
+          printf 'source=%s\ntree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" > "$dir/source.txt"
+          printf '%s\n' 'cargo test --locked --profile ci -p ballista-executor --lib owned_shuffle_and_flight_overlap_runtime_shutdown -- --test-threads=1' > "$dir/d2.command"
+          for mask in 022 077; do
+            umask "$mask"
+            cargo test --locked --profile ci -p ballista-executor --lib owned_shuffle_and_flight_overlap_runtime_shutdown -- --test-threads=1 2>&1 | tee "$dir/green-$mask.log"
+            grep -F 'test result: ok. 1 passed; 0 failed;' "$dir/green-$mask.log"
+          done
+      - name: F04 isolated runtime-owner negative control
+        shell: bash
+        run: |
+          set -euo pipefail
+          export EVIDENCE_DIR="$RUNNER_TEMP/ax2936-f01-f04"
+          control="$(mktemp -d)"
+          git worktree add --detach "$control/source" HEAD
+          trap 'git worktree remove --force "$control/source"; rmdir "$control"' EXIT
+          cd "$control/source"
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("ballista/executor/src/cpu_bound_executor.rs")
+          source = path.read_text()
+          old = "let _work_dir_owner = work_dir_owner;"
+          assert source.count(old) == 1
+          path.write_text(source.replace(old, "drop(work_dir_owner);"))
+          PY
+          git diff --check
+          git diff > "$EVIDENCE_DIR/runtime.patch"
+          printf 'cargo test --locked --profile ci -p ballista-executor --lib owned_shuffle_and_flight_overlap_runtime_shutdown -- --test-threads=1\n' > "$EVIDENCE_DIR/runtime.command"
+          set +e
+          cargo test --locked --profile ci -p ballista-executor --lib owned_shuffle_and_flight_overlap_runtime_shutdown -- --test-threads=1 2>&1 | tee "$EVIDENCE_DIR/runtime.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$rc" > "$EVIDENCE_DIR/runtime.exit"
+          test "$rc" = 101
+          grep -F AX2936_RUNTIME_OWNER "$EVIDENCE_DIR/runtime.log"
+          grep -F 'test result: FAILED. 0 passed; 1 failed;' "$EVIDENCE_DIR/runtime.log"
+          git restore -- ballista/executor/src/cpu_bound_executor.rs
+          git diff --exit-code
+          test "$(git rev-parse HEAD^{tree})" = "3eab5ab4d5aa7ee2fcab75a0f68b5407753d620d"
+          cargo test --locked --profile ci -p ballista-executor --lib owned_shuffle_and_flight_overlap_runtime_shutdown -- --test-threads=1 2>&1 | tee "$EVIDENCE_DIR/restored-green.log"
+          grep -F 'test result: ok. 1 passed; 0 failed;' "$EVIDENCE_DIR/restored-green.log"
+          cd "$GITHUB_WORKSPACE"
+          test "$(git rev-parse HEAD)" = "236fdbcbf4f48784b7d79a66924ddbc3552760f2"
+          git diff --exit-code
+      - name: F01-F03 Core lifecycle and shuffle writer
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/ax2936-f01-f04"
+          run_test() {
+            local label="$1"
+            shift
+            printf '%q ' "$@" > "$dir/$label.command"
+            printf '\n' >> "$dir/$label.command"
+            set +e
+            "$@" 2>&1 | tee "$dir/$label.log"
+            local rc=${PIPESTATUS[0]}
+            set -e
+            printf '%s\n' "$rc" > "$dir/$label.exit"
+            test "$rc" = 0
+            grep -E 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$dir/$label.log"
+          }
+          run_test lifecycle cargo test --locked --profile ci -p ballista-core --features test-disk-writer-gate --lib utils::disk_writer_test_gate::tests
+          grep -F 'test result: ok. 7 passed; 0 failed;' "$dir/lifecycle.log"
+          run_test shuffle-writer cargo test --locked --profile ci -p ballista-core --features test-disk-writer-gate --lib execution_plans::shuffle_writer
+      - name: F03 Core all-features all-targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/ax2936-f01-f04"
+          cmd=(cargo check --locked --profile ci -p ballista-core --all-features --all-targets)
+          printf '%q ' "${cmd[@]}" > "$dir/all-features.command"
+          set +e
+          "${cmd[@]}" 2>&1 | tee "$dir/all-features.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$rc" > "$dir/all-features.exit"
+          if test "$rc" != 0; then
+            baseline="$(mktemp -d)"
+            git worktree add --detach "$baseline/source" a879ad07d204d26df702c681fcb8101dfa1e6c2c
+            trap 'git worktree remove --force "$baseline/source"; rmdir "$baseline"' EXIT
+            git -C "$baseline/source" rev-parse HEAD HEAD^{tree} > "$dir/upstream-baseline.txt"
+            set +e
+            (cd "$baseline/source" && "${cmd[@]}") 2>&1 | tee "$dir/upstream-all-features.log"
+            baseline_rc=${PIPESTATUS[0]}
+            set -e
+            printf '%s\n' "$baseline_rc" > "$dir/upstream-all-features.exit"
+            exit "$rc"
+          fi
+      - name: F03 Ordinary build and feature exclusion
         shell: bash
         run: |
           set -euxo pipefail
-          git diff --exit-code aed8b4c870990f47cffbaa96954239d67acb24cf HEAD -- . ':!ballista/executor/src/executor.rs'
-          python3 - <<'PY'
-          import subprocess
-          path = "ballista/executor/src/executor.rs"
-          before = subprocess.check_output(["git","show","aed8b4c870990f47cffbaa96954239d67acb24cf:" + path]).decode()
-          after = subprocess.check_output(["git","show","HEAD:" + path]).decode()
-          before = before.replace("        use ballista_core::utils::disk_writer_test_gate;\n        use ballista_core::serde::encode_protobuf;", "        use ballista_core::serde::encode_protobuf;")
-          before = before.replace("            Action as BallistaAction, ByteRange, ShuffleFileKind, ShuffleLayout,\n        };\n        use futures::StreamExt;", "            Action as BallistaAction, ByteRange, ShuffleFileKind, ShuffleLayout,\n        };\n        use ballista_core::utils::disk_writer_test_gate;\n        use futures::StreamExt;")
-          before = before.replace("        let writer_saw_file = gate.finished.recv_timeout(Duration::from_secs(10)).unwrap();", "        let writer_saw_file =\n            gate.finished.recv_timeout(Duration::from_secs(10)).unwrap();")
-          assert before == after
-          PY
-          mkdir -p "$RUNNER_TEMP/ax2936-e01-e06"
-          printf 'source=%s\ntree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" > "$RUNNER_TEMP/ax2936-e01-e06/source.txt"
-      - name: E04 Format
+          dir="$RUNNER_TEMP/ax2936-f01-f04"
+          for package in ballista-core ballista-executor; do
+            cargo tree --locked -p "$package" -e features,no-dev > "$dir/$package-normal-features.txt"
+            ! grep -F 'test-disk-writer-gate' "$dir/$package-normal-features.txt"
+            cargo check --locked --profile ci -p "$package" --lib 2>&1 | tee "$dir/$package-normal-check.log"
+          done
+          cargo tree --locked -p ballista-core --all-features -e features > "$dir/core-all-features-tree.txt"
+          cargo check --locked --profile ci -p ballista-core --features test-disk-writer-gate --all-targets 2>&1 | tee "$dir/core-gate-check.log"
+      - name: F04 Format
         shell: bash
         run: |
           set -euxo pipefail
           cargo fmt --all -- --check
           git diff --check a879ad07d204d26df702c681fcb8101dfa1e6c2c HEAD
-      - name: E04 Cargo check
+      - name: F04 Cargo check
         shell: bash
         run: |
           set -euxo pipefail
           cargo check --locked --profile ci -p ballista-executor --all-targets
-      - name: E04 Clippy
+      - name: F04 Clippy
         shell: bash
         run: |
           set -euxo pipefail
           rustup component add clippy
+          cargo clippy --locked --profile ci -p ballista-core --features test-disk-writer-gate --lib --tests -- -D warnings
           cargo clippy --locked --profile ci -p ballista-executor --lib --tests -- -D warnings
-      - name: E04 Verify no gate in normal dependency feature set
+      - name: F04 Verify no gate in normal dependency feature set
         shell: bash
         run: |
           set -euxo pipefail
-          cargo tree --locked -p ballista-executor -e features,no-dev > "$RUNNER_TEMP/ax2936-e01-e06/release-features.txt"
-          ! grep -F 'test-disk-writer-gate' "$RUNNER_TEMP/ax2936-e01-e06/release-features.txt"
-      - name: E03 evidence manifest
+          cargo tree --locked -p ballista-executor -e features,no-dev > "$RUNNER_TEMP/ax2936-f01-f04/release-features.txt"
+          ! grep -F 'test-disk-writer-gate' "$RUNNER_TEMP/ax2936-f01-f04/release-features.txt"
+      - name: F04 evidence manifest
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          dir="$RUNNER_TEMP/ax2936-e01-e06"
+          dir="$RUNNER_TEMP/ax2936-f01-f04"
           mkdir -p "$dir"
           cd "$dir"
           find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 -r sha256sum > SHA256SUMS
@@ -101,6 +190,54 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ax2936-e01-e06-${{ github.run_id }}
-          path: ${{ runner.temp }}/ax2936-e01-e06/
+          name: ax2936-f01-f04-${{ github.run_id }}
+          path: ${{ runner.temp }}/ax2936-f01-f04/
+          if-no-files-found: error
+  macos-qualification:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: 236fdbcbf4f48784b7d79a66924ddbc3552760f2
+          persist-credentials: false
+      - name: Verify exact source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = "236fdbcbf4f48784b7d79a66924ddbc3552760f2"
+          test "$(git rev-parse HEAD^{tree})" = "3eab5ab4d5aa7ee2fcab75a0f68b5407753d620d"
+      - uses: ./.github/actions/setup-macos-builder
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      - name: F04 D2 affected test under both umasks
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH=$PATH:$HOME/d/protoc/bin
+          dir="$RUNNER_TEMP/ax2936-f01-f04-macos"
+          mkdir -p "$dir"
+          printf 'source=%s\ntree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" > "$dir/source.txt"
+          for mask in 022 077; do
+            umask "$mask"
+            cargo test --locked --profile ci -p ballista-executor --lib owned_shuffle_and_flight_overlap_runtime_shutdown -- --test-threads=1 2>&1 | tee "$dir/green-$mask.log"
+            grep -F 'test result: ok. 1 passed; 0 failed;' "$dir/green-$mask.log"
+          done
+      - name: macOS evidence manifest
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/ax2936-f01-f04-macos"
+          mkdir -p "$dir"
+          cd "$dir"
+          for f in *.txt *.log; do
+            if test -f "$f"; then shasum -a 256 "$f"; fi
+          done > SHA256SUMS
+          cat SHA256SUMS
+      - name: Preserve macOS evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ax2936-f01-f04-macos-${{ github.run_id }}
+          path: ${{ runner.temp }}/ax2936-f01-f04-macos/
           if-no-files-found: error
