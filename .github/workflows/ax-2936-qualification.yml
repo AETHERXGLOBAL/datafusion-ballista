@@ -38,7 +38,7 @@ jobs:
       # This delta qualifies the new ownership tests without repeating original RED.
       - uses: actions/checkout@v7.0.1
         with:
-          ref: f6ddcb66d947b72ea8d1d6c592bbd19f98c12968
+          ref: 6831465ca3445bbc1ee612534cdefda533b25e41
           fetch-depth: 0
           persist-credentials: false
       - name: Trust only the checked-out workspace in the ephemeral container
@@ -46,143 +46,46 @@ jobs:
         run: |
           set -euxo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          test "$(git rev-parse HEAD)" = "f6ddcb66d947b72ea8d1d6c592bbd19f98c12968"
-          test "$(git rev-parse HEAD^{tree})" = "d4da6c2c25325e29050b2a2a66096a9afaa95bcf"
+          test "$(git rev-parse HEAD)" = "6831465ca3445bbc1ee612534cdefda533b25e41"
+          test "$(git rev-parse HEAD^{tree})" = "fc4b732e26e56b8a171b70356ebab657992ee9fb"
       - uses: ./.github/actions/setup-builder
-      - name: GREEN exact candidate tests (umask 022)
+      # Run 45726676278 established Linux/macOS GREEN under both umasks and
+      # all four D4 assertion failures on the formatting predecessor.
+      # The successor applies only rustfmt; preserve evidence rather than rerun.
+      - name: Verify formatting-only delta against tested predecessor
         shell: bash
         run: |
           set -euxo pipefail
-          test "$(git rev-parse HEAD)" = "f6ddcb66d947b72ea8d1d6c592bbd19f98c12968"
-          test "$(git rev-parse HEAD^{tree})" = "d4da6c2c25325e29050b2a2a66096a9afaa95bcf"
-          umask 022
-          cargo test --locked --profile ci -p ballista-executor --lib owned_ -- --test-threads=1
-          cargo test --locked --profile ci -p ballista-executor --lib standalone_independent_work_dirs_survive_peer_shutdown -- --test-threads=1
-      - name: Unix restrictive umask regression (077)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          test "$(git rev-parse HEAD)" = "f6ddcb66d947b72ea8d1d6c592bbd19f98c12968"
-          umask 077
-          cargo test --locked --profile ci -p ballista-executor --lib standalone_independent_work_dirs_survive_peer_shutdown -- --test-threads=1
-          cargo test --locked --profile ci -p ballista-executor --lib owned_ -- --test-threads=1
-
-      - name: D4 isolated ownership negative controls
-        shell: bash
-        run: |
-          set -euo pipefail
-          export EVIDENCE_DIR="$RUNNER_TEMP/ax2936-d4"
-          mkdir -p "$EVIDENCE_DIR"
-          printf 'source=%s\ntree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" > "$EVIDENCE_DIR/source.txt"
-          control="$(mktemp -d)"
-          git worktree add --detach "$control/source" HEAD
-          trap 'git worktree remove --force "$control/source"; rmdir "$control"' EXIT
-          cd "$control/source"
-          for mode in runtime response blocking block_response; do
-            git reset --hard "f6ddcb66d947b72ea8d1d6c592bbd19f98c12968"
-            case "$mode" in
-              runtime) filter=owned_shuffle_and_flight_overlap_runtime_shutdown; marker=AX2936_RUNTIME_OWNER ;;
-              response) filter=owned_ipc_do_get_completion_and_cancellation; marker=AX2936_RESPONSE_OWNER ;;
-              blocking) filter=owned_ipc_do_get_completion_and_cancellation; marker=AX2936_BLOCKING_OWNER ;;
-              block_response) filter=owned_ipc_block_transport_pending_io; marker=AX2936_BLOCK_RESPONSE_OWNER ;;
-            esac
-            python3 - "$mode" <<'PY'
-          from pathlib import Path
-          import sys
-          mode = sys.argv[1]
-          root = Path("ballista/executor/src")
-          path = root / ("cpu_bound_executor.rs" if mode == "runtime" else "flight_service.rs")
-          source = path.read_text()
-          replacements = {
-              "runtime": [("let _work_dir_owner = work_dir_owner;", "drop(work_dir_owner);", 1)],
-              "response": [("let owner = self.backend.work_dir_owner.clone();\n        Ok(response.map(|stream| retain_work_dir(stream, owner)))", "Ok(response)", 1)],
-              "blocking": [("                    let owner = self.work_dir_owner.clone();\n", "", 2), ("                        let _owner = owner;\n", "", 2)],
-              "block_response": [("Ok(Response::new(retain_work_dir(\n                            stream,\n                            self.backend.work_dir_owner.clone(),\n                        )))", "Ok(Response::new(stream))", 1)],
-          }
-          for old, new, count in replacements[mode]:
-              assert source.count(old) == count, (mode, old)
-              source = source.replace(old, new)
-          path.write_text(source)
+          git diff --exit-code f6ddcb66d947b72ea8d1d6c592bbd19f98c12968 HEAD -- . ':!ballista/executor/src/executor.rs' ':!ballista/executor/src/flight_service.rs' ':!ballista/executor/src/standalone.rs'
+          python3 - <<'PY'
+          import re
+          import subprocess
+          for path in ("executor.rs", "flight_service.rs", "standalone.rs"):
+              path = "ballista/executor/src/" + path
+              before = subprocess.check_output(["git", "show", "f6ddcb66d947b72ea8d1d6c592bbd19f98c12968:" + path])
+              after = subprocess.check_output(["git", "show", "HEAD:" + path])
+              def normalize(s):
+                  return re.sub(rb",\)", b")", re.sub(rb"\s", b"", s))
+              assert normalize(before) == normalize(after), path
           PY
-            git diff --check
-            git diff > "$EVIDENCE_DIR/$mode.patch"
-            printf 'cargo test --locked --profile ci -p ballista-executor --lib %s -- --test-threads=1\n' "$filter" > "$EVIDENCE_DIR/$mode.command"
-            set +e
-            cargo test --locked --profile ci -p ballista-executor --lib "$filter" -- --test-threads=1 2>&1 | tee "$EVIDENCE_DIR/$mode.log"
-            rc=${PIPESTATUS[0]}
-            set -e
-            printf '%s\n' "$rc" > "$EVIDENCE_DIR/$mode.exit"
-            test "$rc" = 101
-            grep -F "$marker" "$EVIDENCE_DIR/$mode.log"
-            grep -F 'test result: FAILED. 0 passed; 1 failed;' "$EVIDENCE_DIR/$mode.log"
-          done
-          cd "$GITHUB_WORKSPACE"
-          test "$(git rev-parse HEAD)" = "f6ddcb66d947b72ea8d1d6c592bbd19f98c12968"
-          test "$(git rev-parse HEAD^{tree})" = "d4da6c2c25325e29050b2a2a66096a9afaa95bcf"
-          git diff --exit-code
-      - name: D4 evidence manifest
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          dir="$RUNNER_TEMP/ax2936-d4"
-          mkdir -p "$dir"
-          cd "$dir"
-          find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 -r sha256sum > SHA256SUMS
-          cat SHA256SUMS
-      - name: Preserve D4 execution evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ax2936-d4-${{ github.run_id }}
-          path: ${{ runner.temp }}/ax2936-d4/
-          if-no-files-found: error
-
       - name: Format
         shell: bash
         run: |
           set -euxo pipefail
-          test "$(git rev-parse HEAD)" = "f6ddcb66d947b72ea8d1d6c592bbd19f98c12968"
+          test "$(git rev-parse HEAD)" = "6831465ca3445bbc1ee612534cdefda533b25e41"
           cargo fmt --all -- --check
           git diff --check a879ad07d204d26df702c681fcb8101dfa1e6c2c HEAD
       - name: Cargo check
         shell: bash
         run: |
           set -euxo pipefail
-          test "$(git rev-parse HEAD)" = "f6ddcb66d947b72ea8d1d6c592bbd19f98c12968"
+          test "$(git rev-parse HEAD)" = "6831465ca3445bbc1ee612534cdefda533b25e41"
           cargo check --locked --profile ci -p ballista-executor --all-targets
       - name: Clippy
         shell: bash
         run: |
           set -euxo pipefail
-          test "$(git rev-parse HEAD)" = "f6ddcb66d947b72ea8d1d6c592bbd19f98c12968"
+          test "$(git rev-parse HEAD)" = "6831465ca3445bbc1ee612534cdefda533b25e41"
           rustup component add clippy
           cargo clippy --locked --profile ci -p ballista-executor --lib --tests -- -D warnings
 
-  macos-qualification:
-    runs-on: macos-latest
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          ref: f6ddcb66d947b72ea8d1d6c592bbd19f98c12968
-          persist-credentials: false
-      - name: Verify candidate identity
-        shell: bash
-        run: |
-          set -euxo pipefail
-          test "$(git rev-parse HEAD)" = "f6ddcb66d947b72ea8d1d6c592bbd19f98c12968"
-          test "$(git rev-parse HEAD^{tree})" = "d4da6c2c25325e29050b2a2a66096a9afaa95bcf"
-      - uses: ./.github/actions/setup-macos-builder
-      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
-      - name: macOS ownership delta qualification
-        shell: bash
-        run: |
-          set -euxo pipefail
-          export PATH=$PATH:$HOME/d/protoc/bin
-          umask 022
-          cargo test --locked --profile ci -p ballista-executor --lib owned_ -- --test-threads=1
-          cargo test --locked --profile ci -p ballista-executor --lib standalone_independent_work_dirs_survive_peer_shutdown -- --test-threads=1
-          umask 077
-          cargo test --locked --profile ci -p ballista-executor --lib owned_ -- --test-threads=1
-          cargo test --locked --profile ci -p ballista-executor --lib standalone_independent_work_dirs_survive_peer_shutdown -- --test-threads=1
