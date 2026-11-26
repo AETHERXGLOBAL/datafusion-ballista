@@ -25,76 +25,63 @@ on:
 permissions:
   contents: read
 jobs:
-  qualification:
+  publication-lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
-    container:
-      image: amd64/rust
+    timeout-minutes: 120
     env:
-      CARGO_TARGET_DIR: /tmp/ax-2936-target
+      RUSTFLAGS: "-C debuginfo=1"
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           ref: 24e711a0216d3ec72fc8bf915733b420e55ae562
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify exact source
+      - name: Verify exact frozen candidate
         shell: bash
         run: |
           set -euxo pipefail
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           test "$(git rev-parse HEAD)" = "24e711a0216d3ec72fc8bf915733b420e55ae562"
           test "$(git rev-parse HEAD^{tree})" = "e69ce3835ada336883674a359872842b4b69be16"
-      - uses: ./.github/actions/setup-builder
-      # Functional, mutation, Core all-features and ordinary-build evidence
-      # was executed on the exact formatting predecessor in run 45731179238.
-      - name: Verify exact rustfmt-only delta
-        shell: bash
+          mkdir -p "$RUNNER_TEMP/ax2936-publication-lint"
+          printf 'source=%s\ntree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" > "$RUNNER_TEMP/ax2936-publication-lint/source.txt"
+      - name: Setup upstream prerequisites
         run: |
-          set -euxo pipefail
-          git diff --exit-code 236fdbcbf4f48784b7d79a66924ddbc3552760f2 HEAD -- . ':!ballista/core/src/utils.rs'
-          python3 - <<'PY'
-          import subprocess
-          path = "ballista/core/src/utils.rs"
-          before = subprocess.check_output(["git","show","236fdbcbf4f48784b7d79a66924ddbc3552760f2:" + path]).decode()
-          after = subprocess.check_output(["git","show","HEAD:" + path]).decode()
-          old_line = "            > = Box::pin(RecordBatchStreamAdapter::new(schema, futures::stream::empty()));"
-          new_lines = "            > = Box::pin(RecordBatchStreamAdapter::new(\n                schema,\n                futures::stream::empty(),\n            ));"
-          assert before.count(old_line) == 2
-          assert before.replace(old_line, new_lines) == after
-          PY
-          mkdir -p "$RUNNER_TEMP/ax2936-f01-f04"
-          printf 'source=%s\ntree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" > "$RUNNER_TEMP/ax2936-f01-f04/source.txt"
-      - name: F04 Format
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cargo fmt --all -- --check
-          git diff --check a879ad07d204d26df702c681fcb8101dfa1e6c2c HEAD
-      - name: F04 Cargo check
-        shell: bash
-        run: |
-          set -euxo pipefail
-          cargo check --locked --profile ci -p ballista-executor --all-targets
-      - name: F04 Clippy
-        shell: bash
-        run: |
-          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          rustup toolchain install stable
+          rustup default stable
           rustup component add clippy
-          cargo clippy --locked --profile ci -p ballista-core --features test-disk-writer-gate --lib --tests -- -D warnings
-          cargo clippy --locked --profile ci -p ballista-executor --lib --tests -- -D warnings
-      - name: F04 Verify no gate in normal dependency feature set
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c
+        with:
+          tool: taplo-cli@0.10.0
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c
+        with:
+          tool: cargo-machete@0.9.2
+      - name: ASR-B2936-03 remaining upstream lint scripts
         shell: bash
         run: |
-          set -euxo pipefail
-          cargo tree --locked -p ballista-executor -e features,no-dev > "$RUNNER_TEMP/ax2936-f01-f04/release-features.txt"
-          ! grep -F 'test-disk-writer-gate' "$RUNNER_TEMP/ax2936-f01-f04/release-features.txt"
-      - name: F04 evidence manifest
+          set -euo pipefail
+          dir="$RUNNER_TEMP/ax2936-publication-lint"
+          # rustfmt passed on this exact source in run 45788510590.
+          # Execute only the remaining upstream script scopes; no regression reruns.
+          failed=0
+          for script in rust_toml_fmt rust_machete rust_proto_check rust_config_docs_check rust_docs rust_clippy; do
+            printf '%s\n' "ci/scripts/$script.sh" > "$dir/$script.command"
+            set +e
+            "ci/scripts/$script.sh" 2>&1 | tee "$dir/$script.log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            printf '%s\n' "$rc" > "$dir/$script.exit"
+            if test "$rc" != 0; then failed=1; fi
+          done
+          git diff --exit-code
+          test "$failed" = 0
+      - name: Evidence manifest
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          dir="$RUNNER_TEMP/ax2936-f01-f04"
+          dir="$RUNNER_TEMP/ax2936-publication-lint"
           mkdir -p "$dir"
           cd "$dir"
           find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 -r sha256sum > SHA256SUMS
@@ -103,6 +90,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ax2936-f01-f04-${{ github.run_id }}
-          path: ${{ runner.temp }}/ax2936-f01-f04/
+          name: ax2936-publication-lint-${{ github.run_id }}
+          path: ${{ runner.temp }}/ax2936-publication-lint/
           if-no-files-found: error
